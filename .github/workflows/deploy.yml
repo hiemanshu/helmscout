@@ -1,0 +1,111 @@
+name: Update index & deploy site
+
+# Runs on your self-hosted runners (they hold the repo clone cache). It updates
+# the index, publishes the database as a rolling GitHub release asset for the
+# API to fetch at boot, then builds and deploys the *static* frontend to
+# Cloudflare Pages. The API is a separate deployment (see .github/workflows/api.yml).
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      full:
+        description: "Force a full re-index (ignore the skip-unchanged check)"
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+
+concurrency:
+  group: update-index
+  cancel-in-progress: false
+
+jobs:
+  update-and-deploy:
+    runs-on: [self-hosted, linux]
+    env:
+      # The pipeline + prerender run on the runner (not a release). The database
+      # is the local SQLite file, built here and published for the API to fetch.
+      MIX_ENV: dev
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      HELMSCOUT_SOURCES_CONFIG: config/sources.yaml
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "29"
+          elixir-version: "1.20"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Cache Elixir deps and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-${{ hashFiles('mix.lock') }}
+
+      - name: Install Elixir deps
+        run: mix deps.get && mix compile
+
+      - name: Update the search index
+        run: |
+          if [ "${{ inputs.full }}" = "true" ]; then
+            mix helmscout.update --force
+          else
+            mix helmscout.update --only-stale 1
+          fi
+
+      - name: Backfill app identity (image -> app)
+        run: mix helmscout.apps
+
+      - name: Publish database artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Compact before publishing: every API container downloads this file at boot.
+          mix run -e 'Ecto.Adapters.SQL.query!(Helmscout.Repo, "PRAGMA wal_checkpoint(TRUNCATE)", []); Ecto.Adapters.SQL.query!(Helmscout.Repo, "VACUUM", [])'
+
+          # Rolling release asset the deployed API fetches at boot
+          # (HELMSCOUT_DB_URL=https://github.com/<owner>/<repo>/releases/download/db/helmscout.db.gz)
+          gzip -c data/helmscout.db > helmscout.db.gz
+          gh release view db >/dev/null 2>&1 || \
+            gh release create db --title "database" --notes "rolling read-only sqlite database" --latest=false
+          gh release upload db helmscout.db.gz --clobber
+
+      - name: Build frontend
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - name: Point the SPA at the API, wire Pages routing, prerender home
+        run: |
+          # API_BASE_URL is a repository variable (Settings -> Variables), e.g.
+          # https://api.helmscout.dev. Empty = same origin (single-host deploys).
+          API_BASE="${{ vars.API_BASE_URL }}"
+          printf '{"apiBase":"%s"}' "$API_BASE" > web/dist/config.json
+
+          # Cloudflare Pages routing: the sitemap is served by the API host when one
+          # is configured (otherwise /sitemap.xml would fall through to the SPA
+          # shell and robots.txt would advertise HTML as a sitemap). Exact rules
+          # must precede the SPA fallback, which keeps deep links working.
+          {
+            if [ -n "$API_BASE" ]; then printf '/sitemap.xml %s/sitemap.xml 302\n' "$API_BASE"; fi
+            printf '/*    /index.html   200\n'
+          } > web/dist/_redirects
+
+          mix helmscout.prerender --dist web/dist
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy web/dist --project-name=helmscout

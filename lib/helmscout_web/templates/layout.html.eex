@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title><%= esc(@title) %> · helmscout</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+             max-width: 60rem; margin: 0 auto; padding: 1.5rem; line-height: 1.5; }
+      header a.brand { font-weight: 700; text-decoration: none; font-size: 1.25rem; }
+      form.search { display: flex; gap: .5rem; margin: 1.25rem 0; }
+      input[type=search] { flex: 1; padding: .6rem .8rem; font-size: 1rem;
+             border: 1px solid #8888; border-radius: .4rem; background: transparent; color: inherit; }
+      button { padding: .6rem 1rem; font-size: 1rem; border-radius: .4rem;
+             border: 1px solid #8888; cursor: pointer; background: transparent; color: inherit; }
+      .stats { color: #888; font-size: .9rem; }
+      table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+      th, td { text-align: left; padding: .4rem .6rem; border-bottom: 1px solid #8883; vertical-align: top; }
+      td.num { text-align: right; font-variant-numeric: tabular-nums; }
+      a { color: #4a9eff; }
+      code { background: #8881; padding: .1rem .3rem; border-radius: .25rem; }
+      footer { margin-top: 2rem; color: #888; font-size: .85rem; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <a class="brand" href="/">helmscout</a>
+      <span class="stats"> — <%= @stats.releases %> releases · <%= @stats.charts %> charts · <%= @stats.sources %> repos</span>
+    </header>
+
+    <form class="search" method="get" action="/">
+      <input type="search" name="q" value="<%= esc(@q) %>" placeholder="Search a Helm chart, e.g. immich, cilium, grafana…" autofocus>
+      <button type="submit">Search</button>
+    </form>
+
+    <main><%= @body %></main>
+
+    <footer>
+      Indexed from public GitOps repos · JSON API at <a href="/api/stats">/api/stats</a> · MCP at <code>/mcp</code>
+    </footer>
+  </body>
+</html>

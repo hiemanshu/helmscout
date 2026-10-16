@@ -1,0 +1,23 @@
+# Repositories to always discover, grouped by forge ("service").
+#
+# Every public, non-fork, non-archived repository of the listed users/orgs is
+# pulled in regardless of topics or code-search visibility. This is the reliable
+# way to guarantee your own repos are indexed.
+#
+# Supported services:
+#   github            - GitHub user or org (uses the GraphQL API)
+#   gitlab            - gitlab.com user or group
+#   codeberg          - Codeberg user or org
+#   "gitea:<base-url>" - any Gitea/Forgejo instance, e.g. gitea:https://git.example.com
+#
+# Values may be a single string or a list.
+
+users:
+  github:
+    - hiemanshu
+  # gitlab:
+  #   - some-user
+  # codeberg:
+  #   - someone
+  # "gitea:https://git.example.com":
+  #   - someone

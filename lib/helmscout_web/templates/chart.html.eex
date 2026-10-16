@@ -1,0 +1,29 @@
+<p><a href="/">&larr; back to search</a></p>
+<h2><%= esc(@chart) %></h2>
+<p class="stats"><%= length(@releases) %> release(s):</p>
+
+<%= if @releases == [] do %>
+  <p>No releases found.</p>
+<% else %>
+  <table>
+    <thead>
+      <tr><th>Repository</th><th>Namespace</th><th>Version</th><th>Manifest</th></tr>
+    </thead>
+    <tbody>
+      <%= for %{release: r, source: s} <- @releases do %>
+        <tr>
+          <td>
+            <a href="<%= esc(s.url) %>"><%= esc(s.name) %></a>
+            <br><span class="stats">★ <%= s.stars %></span>
+          </td>
+          <td><%= esc(r.namespace || "—") %></td>
+          <td><%= esc(r.chart_version || "—") %></td>
+          <td>
+            <a href="<%= esc(r.file_url) %>"><%= esc(r.file_path) %></a>
+            <br><span class="stats"><code><%= esc(r.scanner) %></code> · <a href="/api/releases/<%= r.id %>/values">values</a></span>
+          </td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+<% end %>

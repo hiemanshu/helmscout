@@ -1,0 +1,36 @@
+helmscout — third-party notices
+================================
+
+The built site bundles the following third-party assets. Their licenses are
+reproduced or linked below; the full license text for each package ships in
+web/node_modules/<package>.
+
+Fonts
+-----
+- Fira Code — © 2012-2015 The Fira Code Project Authors.
+  SIL Open Font License 1.1 (OFL-1.1). https://github.com/tonsky/FiraCode
+  Bundled via the @fontsource/fira-code package.
+
+Icons
+-----
+- Material Design Icons (MDI) — Pictogrammers.
+  Apache License 2.0. https://pictogrammers.com/library/mdi/
+  Served via the @mdi/font package.
+
+JavaScript libraries
+--------------------
+- Vue.js — MIT License. https://github.com/vuejs/core
+- Vuetify — MIT License. https://github.com/vuetifyjs/vuetify
+- highlight.js — BSD 3-Clause License. https://github.com/highlightjs/highlight.js
+- sql.js — MIT License. https://github.com/sql-js/sql.js
+  (SQLite itself is in the public domain.)
+- js-yaml — MIT License. https://github.com/nodeca/js-yaml
+
+Data
+----
+helmscout indexes publicly available Git repositories. That content (manifests,
+values, READMEs) remains under each repository's own license; helmscout only
+stores references and derived metadata.
+
+Elixir dependencies (mix deps) are listed in mix.lock and retain their own
+licenses.

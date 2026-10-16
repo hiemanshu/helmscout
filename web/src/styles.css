@@ -1,0 +1,53 @@
+/* Fira Code (OFL) is self-hosted via @fontsource (see src/main.js imports). */
+
+:root {
+  --ks-font:
+    'Fira Code', 'FiraCode Nerd Font', ui-monospace, 'Cascadia Code',
+    'JetBrains Mono', 'SFMono-Regular', Menlo, Consolas, monospace;
+}
+
+/* Bump the base size two notches above the browser default (16 -> 18px).
+   Everything Vuetify sizes in rem scales with it. */
+html {
+  font-size: 18px;
+}
+
+html,
+body,
+#app,
+.v-application {
+  font-family: var(--ks-font);
+}
+
+input,
+textarea,
+select,
+button,
+.v-btn,
+.v-field,
+.v-label,
+.v-list-item-title,
+.v-card-title {
+  font-family: inherit;
+}
+
+code,
+pre,
+kbd,
+.yaml {
+  font-family: var(--ks-font);
+}
+
+/* One spacing scale for every table (repos/installs, most common values, …) so
+   the gap between content and the row borders is identical everywhere. */
+.v-table .v-table__wrapper > table > thead > tr > th,
+.v-table .v-table__wrapper > table > tbody > tr > td {
+  padding: 14px 16px !important;
+  line-height: 1.6;
+  vertical-align: middle;
+}
+
+/* Keep Material Design Icons on their own font. */
+.mdi {
+  font-family: 'Material Design Icons' !important;
+}

@@ -1,0 +1,17 @@
+_build/
+deps/
+doc/
+cover/
+.git/
+.github/
+data/
+log/
+tmp/
+*.ez
+erl_crash.dump
+/test/
+
+# frontend dev/deps (the dist is copied in its own stage)
+web/node_modules/
+web/dist/
+web/.vite/

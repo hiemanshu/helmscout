@@ -1,0 +1,25 @@
+<%= if @q in [nil, ""] do %>
+  <h2>Popular charts</h2>
+<% else %>
+  <h2>Results for &ldquo;<%= esc(@q) %>&rdquo;</h2>
+<% end %>
+
+<%= if @charts == [] do %>
+  <p>No charts match. Try another name.</p>
+<% else %>
+  <table>
+    <thead>
+      <tr><th>Chart</th><th class="num">Sources</th><th class="num">Releases</th><th>Last seen</th></tr>
+    </thead>
+    <tbody>
+      <%= for chart <- @charts do %>
+        <tr>
+          <td><a href="/charts/<%= url(chart.chart) %>"><%= esc(chart.chart) %></a></td>
+          <td class="num"><%= chart.sources %></td>
+          <td class="num"><%= chart.releases %></td>
+          <td><%= fmt(chart.last_seen) %></td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+<% end %>
