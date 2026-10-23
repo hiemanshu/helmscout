@@ -354,6 +354,8 @@ and bakes the result into the image. The deployed app opens that file read-only
 
 ### Build the image
 
+See `build.txt` for the full local build + Fly deploy runbook.
+
 The database enters through a **named build context**, so it never has to live in
 the repository or the main Docker build context:
 

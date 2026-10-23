@@ -1,0 +1,197 @@
+helmscout — local build & deploy
+================================
+
+Everything here runs on your machine. GitHub Actions is not involved. The
+FLY_API_TOKEN / FLY_APP repository settings are only used by the optional CI
+workflow (.github/workflows/release.yml).
+
+The deployed artifact is one immutable image containing:
+
+  - the Vue SPA (built inside Docker)
+  - the Phoenix JSON API and the MCP endpoint (/api/mcp)
+  - a read-only SQLite snapshot at /app/data/helmscout.db
+
+There is no download at boot, no volume, and no writable state. The database is
+passed in as a Docker named build context (`db`), so it never has to live in the
+repo or the main build context.
+
+Prerequisites
+-------------
+  - Elixir/Erlang (mix)
+  - Docker with BuildKit (named build contexts require it)
+  - sqlite3
+  - flyctl, logged in: `fly auth login`
+  - data/helmscout.db already populated by the indexer
+
+Node is not needed on the host; the Dockerfile runs `npm ci && npm run build`
+inside the frontend stage.
+
+
+0. One-time Fly app setup
+-------------------------
+Skip anything that already exists.
+
+  fly apps create helmscout          # name must be globally unique
+  fly ips allocate-v4 --shared -a helmscout
+  fly ips allocate-v6 -a helmscout
+  fly secrets set SECRET_KEY_BASE="$(openssl rand -base64 48)" -a helmscout
+
+  fly secrets list -a helmscout      # confirm SECRET_KEY_BASE
+  fly ips list -a helmscout
+
+If the app is not called `helmscout`, update `app` in fly.toml and use that name
+in the registry image reference and in `--app` below.
+
+`SECRET_KEY_BASE` is Phoenix's signing key. It must exist before the first
+deploy or the app will crash-loop on boot.
+
+
+1. Refresh the index (optional, but this is the "full local data" path)
+----------------------------------------------------------------------
+The local clone cache (data/repos, ~127 GB) is what makes this cheap; only stale
+repos are re-fetched.
+
+  cd ~/personal/helmscout
+  mix deps.get                        # first checkout only
+  mix helmscout.update --only-stale 1
+  mix helmscout.apps
+
+Expect: ~4,700 sources and ~36,000 releases in data/helmscout.db.
+
+
+2. Snapshot the database
+------------------------
+VACUUM INTO produces a consistent, compacted, delete-journal single file, safe to
+do while the live DB is in WAL mode. The app opens it read-only (`mode:
+:readonly`), so it must not be a WAL database.
+
+  mkdir -p db-bake
+  rm -f db-bake/helmscout.db
+  sqlite3 data/helmscout.db "VACUUM INTO 'db-bake/helmscout.db'"
+
+  sqlite3 db-bake/helmscout.db "PRAGMA journal_mode;"        # delete
+  sqlite3 db-bake/helmscout.db "PRAGMA integrity_check;"     # ok
+  sqlite3 db-bake/helmscout.db "SELECT count(*) FROM helm_releases;"
+  ls -lh db-bake/helmscout.db
+
+Expect ~75 MB on disk and a release count above 100. db-bake/ is gitignored.
+
+
+3. Build the image
+------------------
+The `db` named context must point at the directory containing helmscout.db.
+
+  TAG="local-$(date -u +%Y%m%d-%H%M)"
+  IMG="registry.fly.io/helmscout:$TAG"
+
+  docker build --build-context db=db-bake -t "$IMG" .
+
+Do not build with a plain `docker build .` — the Dockerfile's `COPY --from=db`
+will fail without the context. Do not use `fly deploy` from source either:
+flyctl cannot pass Docker named build contexts. Build locally, push to Fly's
+registry, then deploy the image reference.
+
+
+4. Smoke-test the image locally
+-------------------------------
+Uses port 4100 so it does not clash with a dev server on 4000.
+
+  docker rm -f hs-smoke 2>/dev/null || true
+
+  docker run -d --name hs-smoke -p 4100:4000 \
+    -e SECRET_KEY_BASE="$(openssl rand -base64 48)" "$IMG"
+
+  sleep 3
+  curl -fsS http://127.0.0.1:4100/health
+  curl -fsS http://127.0.0.1:4100/api/stats
+  curl -fsS http://127.0.0.1:4100/config.json        # {}
+
+  docker rm -f hs-smoke
+
+If it fails, check the logs before removing the container:
+
+  docker logs hs-smoke
+
+
+5. Push to Fly's registry
+-------------------------
+`fly auth docker` configures Docker credentials for registry.fly.io. It only has
+to be run once.
+
+  fly auth docker
+  docker push "$IMG"
+
+This uploads the image layers on the first push (the image is ~600 MB on disk;
+the DB layer alone is ~12 MB compressed). Later pushes only upload changed
+layers.
+
+GHCR is not required for this flow. To also keep a copy on GitHub:
+
+  docker tag "$IMG" ghcr.io/<owner>/helmscout:nightly
+  docker push ghcr.io/<owner>/helmscout:nightly
+
+That needs a PAT with write:packages, and the GHCR package must be made public if
+anything else (e.g. Fly) has to pull it anonymously.
+
+
+6. Deploy
+---------
+  fly deploy --image "$IMG" --app helmscout --strategy immediate
+
+fly.toml supplies the service config: internal_port 4000, /health check,
+512 MB shared CPU, region sin, autostop/autostart on, min_machines_running 0.
+
+
+7. Verify
+---------
+  fly status -a helmscout
+  fly logs -a helmscout
+
+  curl -fsS https://helmscout.fly.dev/health
+  curl -fsS https://helmscout.fly.dev/api/stats
+  curl -fsS https://helmscout.fly.dev/config.json       # {}
+  curl -fsS https://helmscout.fly.dev/sitemap.xml | head
+
+  open https://helmscout.fly.dev/
+
+Everything (SPA, /api/*, /mcp, /api/mcp, /sitemap.xml) is served by the same
+process, so there is no CORS or config.json wiring to get wrong.
+
+`auto_stop_machines = "stop"` means the machine idles down and the first request
+after idle pays a cold boot. There is no database download, so it is just the
+BEAM boot.
+
+
+Troubleshooting
+---------------
+`COPY --from=db: not found`
+  You built without `--build-context db=db-bake`.
+  Or you used `fly deploy` from source; use the prebuilt image instead.
+
+App crash-loops / "SECRET_KEY_BASE environment variable is missing"
+  fly secrets set SECRET_KEY_BASE="$(openssl rand -base64 48)" -a helmscout
+  fly logs -a helmscout
+
+"attempt to write a readonly database"
+  The snapshot was not taken with VACUUM INTO, or is still in WAL mode.
+  Re-run step 2 and check `PRAGMA journal_mode;` returns `delete`.
+
+Image push is slow / fails
+  First push is ~600 MB. Check: df -h, docker system df.
+  For GHCR, confirm the PAT has write:packages and the package is public.
+
+Deploy pulls the wrong/old image
+  Deploy the exact immutable tag ($IMG), not :latest. `fly status` shows the
+  image currently deployed for each Machine.
+
+Region / app name wrong
+  Edit fly.toml (app, primary_region) or override with `--app`/`--region`.
+
+
+Optional: CI
+------------
+.github/workflows/release.yml is manual (Actions -> Release -> Run workflow).
+It runs the index on a GitHub-hosted runner, which cannot hold the ~127 GB clone
+cache, so use `limit: 200` there for a smoke test only. For the full dataset use
+the local flow above, or switch the index job's `runs-on` to a self-hosted runner
+that has the cache.
