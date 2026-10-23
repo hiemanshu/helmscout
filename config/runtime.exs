@@ -1,20 +1,16 @@
 import Config
 
 if config_env() == :prod do
-  # SQLite file. The pipeline (run on your runner) is the writer; the deployed
-  # app only reads it.
+  # The SQLite snapshot is baked into the image at build time (a named build
+  # context, see the Dockerfile) and opened read-only. There is no download step
+  # and no writable storage requirement.
   config :helmscout, Helmscout.Repo,
-    database: System.get_env("DATABASE_PATH") || "/data/helmscout.db",
+    database: System.get_env("DATABASE_PATH") || "/app/data/helmscout.db",
+    mode: :readonly,
+    journal_mode: :delete,
     pool_size: String.to_integer(System.get_env("POOL_SIZE") || "10"),
-    journal_mode: :wal,
     foreign_keys: :on,
     busy_timeout: 5000
-
-  # Where the read-only copy is fetched from at boot, if set (e.g. a GitHub
-  # release asset holding the gzipped database).
-  if url = System.get_env("HELMSCOUT_DB_URL") do
-    config :helmscout, :database_url, url
-  end
 
   config :helmscout, :cache_dir, System.get_env("CACHE_DIR") || "/data/repos"
 

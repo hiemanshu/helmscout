@@ -13,8 +13,6 @@ defmodule Helmscout.Application do
        pools: %{
          default: [size: 25, count: 1, protocols: [:http2, :http1]]
        }},
-      # Fetches the read-only database (if configured) before Repo opens it.
-      Helmscout.Database,
       Helmscout.Repo,
       HelmscoutWeb.Endpoint
     ]

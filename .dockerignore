@@ -10,6 +10,7 @@ tmp/
 *.ez
 erl_crash.dump
 /test/
+db-bake/
 
 # frontend dev/deps (the dist is copied in its own stage)
 web/node_modules/

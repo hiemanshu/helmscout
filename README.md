@@ -221,10 +221,8 @@ Everything runs concurrently, bounded by the backend's rate limits:
 | `HELMSCOUT_AWESOME_LISTS` | home-kubernetes fork + awesome-homelab | Raw README URLs to scrape |
 | `HELMSCOUT_SOURCES_CONFIG` | `config/sources.yaml` | User/org repos to always include |
 | `HELMSCOUT_PROGRESS_STEP` | `50` | Print a progress line every N items |
-| `DATABASE_PATH` | `/data/helmscout.db` | SQLite file the app reads |
-| `HELMSCOUT_DB_URL` | – | Where the app fetches the db at boot (release asset / bucket) |
-| `HELMSCOUT_DB_TOKEN` | – | Bearer token for the db download, if the asset requires auth |
-| `FRONTEND_DIR` | release `priv/static/frontend` | Built SPA served by the app |
+| `DATABASE_PATH` | `/app/data/helmscout.db` | SQLite snapshot baked into the image (opened read-only) |
+| `FRONTEND_DIR` | `/app/frontend` | Built SPA served by the app |
 | `FRONTEND_ORIGINS` | `*` | CORS allow-list for the API |
 | `PORT`, `SECRET_KEY_BASE`, `POOL_SIZE` | 4000, –, 10 | Server (runtime/prod) |
 
@@ -334,63 +332,82 @@ same-origin. The deploy writes it with `{"apiBase": "https://api.helmscout.dev"}
 The **home page** is server-rendered by Phoenix (`SpaController` injects the
 "most deployed apps" + "discover" markup into the shell from the database), so it
 paints instantly and is crawlable; Vue replaces it on hydration. There is no
-build-time prerender step for the app itself — the deploy workflow only prerenders
-`web/dist/index.html` for the static Pages copy.
+build-time prerender step for the app itself — an optional static Pages build can
+prerender `web/dist/index.html`.
 
 `/sitemap.xml` and `/robots.txt` are served by Phoenix.
 
 ## Deployment
 
-Three pieces, each free or very cheap:
+One container image holds everything: the SPA, the JSON API, the MCP endpoint and
+a read-only snapshot of the database. There is no download at boot, no volume and
+no state to maintain.
 
 | piece | where | cost |
 | --- | --- | --- |
-| **API + MCP** | a small always-on container (Fly, Render, Cloud Run, a VM…) | free–~€2/mo |
-| **frontend** | Cloudflare Pages (static) | free |
-| **database** | a SQLite file, built and published by your runner | free (GitHub release asset) |
-| **runner** | your self-hosted GitHub Actions runner (holds the repo cache) | your infra |
+| **SPA + API + MCP + database** | a small container (Fly, Render, Cloud Run, a VM…) | free–~€2/mo |
+| **runner** | GitHub Actions for now (self-hosted later for the full index) | free / your infra |
 
-The runner is the only writer. It builds `data/helmscout.db`, gzips it, and
-attaches it to a rolling `db` release. The API is **read-only**: at boot it
-downloads that file into `DATABASE_PATH` (see `HELMSCOUT_DB_URL`), so it needs no
-persistent storage of its own.
+The runner is the only writer. It indexes into `data/helmscout.db`, compacts it,
+and bakes the result into the image. The deployed app opens that file read-only
+(`mode: :readonly`) and never writes.
 
-### API + MCP
+### Build the image
 
-`.github/workflows/api.yml` builds and pushes `ghcr.io/<owner>/helmscout:latest`.
-Run it anywhere:
+The database enters through a **named build context**, so it never has to live in
+the repository or the main Docker build context:
 
 ```sh
-docker run -p 4000:4000 \
-  -e SECRET_KEY_BASE=$(openssl rand -base64 48) \
-  -e DATABASE_PATH=/data/helmscout.db \
-  -e HELMSCOUT_DB_URL=https://github.com/<owner>/<repo>/releases/download/db/helmscout.db.gz \
-  -e FRONTEND_ORIGINS=https://helmscout.dev \
-  ghcr.io/<owner>/helmscout:latest
-# serves: /api/*  and  /api/mcp  (Streamable HTTP)
+# consistent, compacted, delete-journal snapshot (safe while the live db is in WAL)
+mkdir -p db-bake
+sqlite3 data/helmscout.db "VACUUM INTO 'db-bake/helmscout.db'"
+
+# bake it in
+docker build --build-context db=db-bake -t helmscout .
+
+# run: the whole site, one process
+docker run -p 4000:4000 -e SECRET_KEY_BASE=$(openssl rand -base64 48) helmscout
 ```
 
-On a platform with no shell (Fly/Render/Cloud Run) the same three env vars in the
-service config are all it needs. `PORT` is honoured.
+`DATABASE_PATH` defaults to the baked `/app/data/helmscout.db`. `SECRET_KEY_BASE`
+is the only required runtime setting; `PORT`, `POOL_SIZE` and `FRONTEND_ORIGINS`
+have defaults. Publish the result as `ghcr.io/<owner>/helmscout:<tag>` and deploy
+it on any container platform.
 
-### Frontend (Cloudflare Pages)
+Because the image is immutable, a bad data build can never overwrite a good one —
+the new image simply is not deployed.
 
-`.github/workflows/deploy.yml` runs on your runner and:
+### CI
 
-1. updates the index (`mix helmscout.update --only-stale 1`) + `mix helmscout.apps`,
-2. compacts (VACUUM) and publishes the database to the rolling `db` release,
-3. builds the SPA (`npm ci && npm run build`),
-4. writes `web/dist/config.json` (API base) and `_redirects` (sitemap redirect + SPA fallback), then prerenders the home page,
-5. deploys `web/dist` to Cloudflare Pages.
+`.github/workflows/release.yml` runs the whole thing in two stages:
 
-Secrets: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`. Repository **variable**
-`API_BASE_URL` (e.g. `https://api.helmscout.dev`) is baked into `config.json`; leave
-it empty for a single-host deploy where the app serves the SPA too.
+1. **index** — update the index, backfill app identity, `VACUUM INTO` a compacted
+   snapshot, verify it (`integrity_check`, delete journal mode, release count)
+   and upload it as an artifact.
+2. **image** — build with `--build-context db=…`, smoke-test the container
+   (`/health`, `/api/stats`), push to GHCR, then optionally `flyctl deploy`.
 
-### Single host (simplest)
+Both stages run on GitHub-hosted runners for now. The index stage keeps its
+clone cache in `data/repos`, which is **~127 GB** for the full source set — far
+beyond a GitHub-hosted runner (roughly 14–30 GB free) and over the 10 GB
+`actions/cache` limit. Use the `limit` input for a smoke run (`limit: 200`), which
+produces a small but real database, image and release. Once a self-hosted runner
+with the clone cache is available, change the index job's `runs-on` and run
+without `limit`.
 
-You can skip the split entirely: run the container (which also serves the SPA) and
-point it at the same SQLite file. Everything is one process.
+The image stage only needs Docker, so it stays on `ubuntu-latest`; the database
+crosses between the jobs as a ~74 MB artifact rather than a 127 GB checkout.
+
+Deploy needs `FLY_APP` (repository variable) and `FLY_API_TOKEN` (secret); the
+included `fly.toml` sets the service, health check and VM size. Without those the
+image is still built and pushed and the deploy step is skipped.
+
+### Split frontend (optional)
+
+To keep static assets on Cloudflare Pages instead, build `web/dist`, write
+`config.json` with `{"apiBase": "https://api.helmscout.dev"}`, run
+`mix helmscout.prerender --dist web/dist`, and upload the directory. The container
+still serves the SPA, so the split is a choice, not a requirement.
 
 ## Development
 

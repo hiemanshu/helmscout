@@ -1,0 +1,198 @@
+name: Release
+
+# Two stages, so the heavy index cache never has to live on the machine that
+# builds the image:
+#
+#   index  -> discover + clone + index + VACUUM INTO a single read-only snapshot
+#   image  -> docker build (snapshot as a named build context) -> smoke test
+#             -> push to GHCR -> optional deploy
+#
+# Runs on GitHub-hosted runners for now. The index stage keeps its clone cache in
+# `data/repos` (~127 GB for the full source set), which does not fit on a
+# GitHub-hosted runner — use the `limit` input for a smoke test. For the full
+# index, switch the index job's `runs-on` to a self-hosted runner once it is set
+# up.
+on:
+  workflow_dispatch:
+    inputs:
+      full:
+        description: "Force a full re-index (ignore last_indexed_at)"
+        type: boolean
+        default: false
+      limit:
+        description: "Index only the first N sources (smoke test)"
+        type: string
+        default: ""
+      deploy:
+        description: "Deploy the pushed image"
+        type: boolean
+        default: true
+  # schedule:
+  #   - cron: "0 3 * * *"
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  index:
+    name: Build the database snapshot
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      MIX_ENV: dev
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      HELMSCOUT_SOURCES_CONFIG: config/sources.yaml
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Keep data/repos around if the workspace is persistent (self-hosted).
+          clean: false
+
+      - name: Disk before
+        run: |
+          df -h /
+          du -sh data/repos 2>/dev/null || echo "no clone cache yet"
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -af
+          df -h /
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "29"
+          elixir-version: "1.20"
+
+      - name: Cache Elixir deps and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: mix-${{ hashFiles('mix.lock') }}
+          restore-keys: mix-
+
+      - name: Install dependencies
+        run: mix deps.get && mix compile
+
+      - name: Update the search index
+        run: |
+          args="--only-stale 1"
+          if [ "${{ inputs.full }}" = "true" ]; then
+            args="--force"
+          fi
+          if [ -n "${{ inputs.limit }}" ]; then
+            args="$args --limit ${{ inputs.limit }}"
+          fi
+          mix helmscout.update $args
+
+      - name: Backfill app identity (image -> app)
+        run: mix helmscout.apps
+
+      - name: Disk after indexing
+        run: |
+          df -h /
+          du -sh data/repos data/helmscout.db
+
+      - name: Snapshot the database
+        run: |
+          command -v sqlite3 >/dev/null || { echo "sqlite3 is required"; exit 1; }
+          rm -rf db-bake && mkdir -p db-bake
+          sqlite3 data/helmscout.db "VACUUM INTO 'db-bake/helmscout.db'"
+
+          mode=$(sqlite3 db-bake/helmscout.db "PRAGMA journal_mode;")
+          integrity=$(sqlite3 db-bake/helmscout.db "PRAGMA integrity_check;")
+          count=$(sqlite3 db-bake/helmscout.db "SELECT count(*) FROM helm_releases;")
+          echo "journal_mode=$mode integrity=$integrity releases=$count"
+
+          [ "$mode" = "delete" ] || { echo "snapshot is not in delete journal mode"; exit 1; }
+          [ "$integrity" = "ok" ] || { echo "integrity check failed"; exit 1; }
+          [ "$count" -ge 100 ] || { echo "database looks empty"; exit 1; }
+
+          du -sh db-bake/helmscout.db
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: helmscout-db
+          path: db-bake/helmscout.db
+          retention-days: 2
+          compression-level: 0
+
+  image:
+    name: Build, smoke-test, push, deploy
+    needs: index
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      FLY_APP: ${{ vars.FLY_APP }}
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: helmscout-db
+          path: db-bake
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        run: echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          # Pass the database in through the named context the Dockerfile expects.
+          build-contexts: db=db-bake
+          # Load locally first so the image can be smoke-tested before it is pushed.
+          load: true
+          push: false
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/helmscout:nightly
+            ghcr.io/${{ github.repository_owner }}/helmscout:nightly-${{ steps.meta.outputs.date }}
+            ghcr.io/${{ github.repository_owner }}/helmscout:sha-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=min
+
+      - name: Smoke test the image
+        run: |
+          trap 'docker rm -f smoke >/dev/null 2>&1 || true' EXIT
+          docker run -d --name smoke -p 4000:4000 \
+            -e SECRET_KEY_BASE="$(openssl rand -base64 48)" \
+            ghcr.io/${{ github.repository_owner }}/helmscout:nightly
+
+          ok=""
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:4000/health >/dev/null; then ok=1; break; fi
+            sleep 2
+          done
+          if [ -z "$ok" ]; then docker logs smoke; exit 1; fi
+
+          curl -fsS http://127.0.0.1:4000/api/stats | grep -q '"releases"'
+          echo "releases: $(curl -fsS http://127.0.0.1:4000/api/stats | grep -o '"releases":[0-9]*')"
+
+      - name: Push to GHCR
+        run: docker push --all-tags ghcr.io/${{ github.repository_owner }}/helmscout
+
+      - name: Deploy to Fly
+        if: ${{ inputs.deploy && env.FLY_APP != '' && env.FLY_API_TOKEN != '' }}
+        run: |
+          curl -fsSL https://fly.io/install.sh | sh
+          export PATH="$HOME/.fly/bin:$PATH"
+          flyctl deploy \
+            --image ghcr.io/${{ github.repository_owner }}/helmscout:nightly \
+            --app "$FLY_APP" \
+            --strategy immediate

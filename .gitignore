@@ -38,6 +38,9 @@ helmscout-*.tar
 # cloned repository working trees (the fetch cache)
 /repos/
 
+# database snapshot baked into the image (built by the deploy pipeline)
+/db-bake/
+
 # per-run progress logs
 /log/
 *.log
