@@ -26,6 +26,13 @@ defmodule HelmscoutWeb.SpaController do
     json(conn, %{})
   end
 
+  @doc "404 for missing static assets (the SPA shell must not answer these)."
+  def not_found(conn, _params) do
+    conn
+    |> put_resp_content_type("text/plain")
+    |> send_resp(404, "not found")
+  end
+
   defp inject_home(html) do
     body = Helmscout.Prerender.render_home()
 

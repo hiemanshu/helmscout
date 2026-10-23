@@ -45,6 +45,9 @@ defmodule HelmscoutWeb.Router do
     # `/mcp` is the MCP docs page; the protocol is at /api/mcp.
     get "/config.json", SpaController, :config
     get "/", SpaController, :index
+    # A missing hashed asset must 404, not fall through to the SPA shell: an HTML
+    # 200 under a .js URL shows up as a MIME error and can poison edge caches.
+    get "/assets/*path", SpaController, :not_found
     get "/*path", SpaController, :index
   end
 end
